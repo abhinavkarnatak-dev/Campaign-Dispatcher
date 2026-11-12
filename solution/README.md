@@ -54,7 +54,9 @@ solution/
 ├── dispatcher/
 │   ├── config.py      # loads campaigns, leads and runtime settings
 │   ├── clock.py       # the provider's simulated clock
-│   └── scheduling.py  # the business rules: windows, waits, priority, limits, final states
+│   ├── scheduling.py  # the business rules: windows, waits, priority, limits, final states
+│   ├── provider.py    # client for the provider API, safe retries with one request_id
+│   └── activities.py  # Temporal activities: place_call and get_call
 └── tests/            # pytest tests, no network needed
 ```
 
@@ -81,3 +83,18 @@ All business rules live in `dispatcher/scheduling.py` as pure functions: they ta
 | Priority (R6) | Due callbacks first, then due retries, then fresh leads. Inside each group, the one waiting longest goes first |
 | Terminal and DND (R7, R8) | A terminal disposition finishes the lead. `dnd` blocks that phone in every campaign |
 | Final state (R9) | `completed` > `exhausted` > `dnd_blocked`. A lead with a call in flight is never finalised until that call's result arrives |
+
+## Placing calls safely
+
+Every call attempt gets a `request_id` (for example `c_acme_renewals:ren_0001:d2`) chosen by the workflow **before** anything is sent, and saved in Temporal's history. Every retry of that attempt uses the same `request_id`, and the provider places at most one call per `request_id`. So a retry after an error, a timeout or a crash can never place a second call.
+
+`place_call` turns every provider response into one of three answers:
+
+| Provider response | Answer |
+|---|---|
+| `201`, or `200` (this `request_id` already exists) | `accepted` |
+| `503` | Retried a few times with the same `request_id`, then `not_placed` |
+| `504` or a network error (outcome unknown) | Look the call up with `GET /v1/calls?request_id=...`. Found: `accepted`. Not found: retried with the same `request_id` |
+| `409`, `422`, `429` (a rule was broken) | `rejected`, never retried |
+
+Right before every request, including retries, the activity checks the calling window again using the real current time. If the window has closed, nothing is sent and the answer is `not_placed`. If a lookup itself fails, the error goes up to Temporal, which retries the whole activity later with the same `request_id`.
