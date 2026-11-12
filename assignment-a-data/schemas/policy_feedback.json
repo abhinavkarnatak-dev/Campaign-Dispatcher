@@ -1,0 +1,19 @@
+{
+  "workflow_id": "policy_feedback",
+  "description": "Post-purchase feedback calls for device-protection orders.",
+  "fields": [
+    {"name": "customer_name", "type": "string", "required": true, "pii": true,
+     "aliases": ["name", "customer name"]},
+    {"name": "phone", "type": "phone", "required": true, "pii": true,
+     "aliases": ["mobile", "mobile no", "phone number", "contact"]},
+    {"name": "order_id", "type": "string", "required": true, "reference": true,
+     "aliases": ["order id", "order"]},
+    {"name": "product", "type": "string", "required": false,
+     "aliases": ["item"]},
+    {"name": "order_date", "type": "date", "required": false,
+     "aliases": ["order date", "purchase date"]},
+    {"name": "preferred_language", "type": "enum", "required": false,
+     "values": ["en", "hi", "ta", "kn", "te", "mr"], "default": "en",
+     "aliases": ["language"]}
+  ]
+}

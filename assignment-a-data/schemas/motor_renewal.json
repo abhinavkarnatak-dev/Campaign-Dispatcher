@@ -1,0 +1,19 @@
+{
+  "workflow_id": "motor_renewal",
+  "description": "Outbound motor-insurance renewal reminders.",
+  "fields": [
+    {"name": "customer_name", "type": "string", "required": true, "pii": true,
+     "aliases": ["name", "customer name", "insured name"]},
+    {"name": "phone", "type": "phone", "required": true, "pii": true,
+     "aliases": ["mobile", "mobile no", "phone number", "contact"]},
+    {"name": "policy_number", "type": "string", "required": true, "reference": true,
+     "aliases": ["policy no", "policy"]},
+    {"name": "policy_expiry", "type": "date", "required": false,
+     "aliases": ["expiry date", "expiry"]},
+    {"name": "premium_amount", "type": "decimal", "required": false,
+     "aliases": ["premium"]},
+    {"name": "preferred_language", "type": "enum", "required": false,
+     "values": ["en", "hi", "ta", "kn", "te", "mr"], "default": "en",
+     "aliases": ["language"]}
+  ]
+}

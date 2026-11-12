@@ -1,0 +1,15 @@
+workflow_id,code,label,is_terminal,is_success
+motor_renewal,renewed,Policy renewed,true,true
+motor_renewal,payment_link_sent,Payment link sent,false,false
+motor_renewal,callback_requested,Callback requested,false,false
+motor_renewal,not_interested,Not interested,true,false
+motor_renewal,wrong_number,Wrong number,true,false
+motor_renewal,already_renewed_elsewhere,Renewed with another insurer,true,false
+motor_renewal,language_barrier,Language barrier,false,false
+motor_renewal,dnd,Do not disturb,true,false
+policy_feedback,feedback_captured,Feedback captured,true,true
+policy_feedback,partial_feedback,Partial feedback,false,false
+policy_feedback,callback_requested,Callback requested,false,false
+policy_feedback,refused,Refused,true,false
+policy_feedback,wrong_number,Wrong number,true,false
+policy_feedback,dnd,Do not disturb,true,false
