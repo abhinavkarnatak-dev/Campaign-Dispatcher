@@ -21,6 +21,37 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+## Run it
+
+Three terminals, all from the repo root with the virtual environment active.
+
+**1. Temporal server**
+
+```bash
+cd solution
+temporal server start-dev --db-filename temporal.db
+```
+
+The database file keeps Temporal's data if the server itself is restarted. It is created inside `solution/`, where git ignores it. Temporal's web UI is at http://localhost:8233, where you can watch the workflow and every step it takes.
+
+**2. The provider**
+
+```bash
+cd assignment-b-workflow
+python -m mock_telephony
+```
+
+**3. The dispatcher**
+
+```bash
+cd solution
+python -m dispatcher run
+```
+
+It runs until every lead reaches a final state, then prints a summary and exits. While it runs, http://127.0.0.1:8200/status shows progress per campaign.
+
+**Restarting** is the same command. If the process is killed (even with `kill -9`), running `python -m dispatcher run` again re-attaches to the same workflow and continues. Against a brand new provider run, it starts a fresh workflow. If the workflow has already finished, it just reads the result.
+
 ## Run the tests
 
 ```bash
@@ -57,7 +88,10 @@ solution/
 │   ├── scheduling.py  # the business rules: windows, waits, priority, limits, final states
 │   ├── provider.py    # client for the provider API, safe retries with one request_id
 │   ├── activities.py  # Temporal activities: place_call and get_call
-│   └── workflow.py    # the coordinator workflow that owns every lead
+│   ├── workflow.py    # the coordinator workflow that owns every lead
+│   ├── webhooks.py    # webhook receiver: checks signatures, signals the workflow
+│   ├── main.py        # runs receiver, worker and workflow in one process
+│   └── __main__.py    # command line: python -m dispatcher run
 └── tests/            # pytest tests, no network needed
 ```
 
@@ -123,3 +157,26 @@ Call results come in as the `call_result` signal:
 Progress can be read at any time with the workflow's `status` query.
 
 **Why it survives a crash:** every decision, activity result, signal and timer is stored in Temporal's history. A restarted worker replays that history through the same code, rebuilds exactly the same state, and continues. To keep replay exact, the workflow only reads time from `workflow.now()`, never touches the network (activities do), and never makes a decision based on the order of a Python set. The campaign config is passed in without the webhook secret, because workflow inputs are stored in history.
+
+## Webhooks and restarts
+
+The provider sends each call result to `POST /webhooks/telephony`. The receiver checks the `X-AU-Signature` header (HMAC-SHA256 of the raw body, compared in constant time) and passes the result into the workflow as the `call_result` signal. Once Temporal accepts a signal it is stored on the Temporal server, so it is safe even if the worker is down at that moment.
+
+| Case | Response |
+|---|---|
+| Valid signature, result handed to Temporal | `200` |
+| Missing or wrong signature | `401` |
+| Body is not a valid call result | `400` |
+| Temporal could not be reached | `503`, so the provider redelivers |
+
+The receiver, the Temporal worker and the workflow run in one process. The receiver starts first, so it is already listening when the first call is placed. The webhook secret stays in the receiver and is never passed to the workflow.
+
+The workflow ID includes the provider's clock start time, for example `campaign-dispatch-1794397432`. This gives one workflow per provider run:
+
+| Situation | What happens |
+|---|---|
+| Restart after a crash, same provider run | Same ID, so the dispatcher re-attaches to the running workflow |
+| A brand new provider run | New ID, so a fresh workflow starts |
+| Restart after the workflow finished | Temporal refuses a duplicate, so the dispatcher reads the stored result |
+
+So a restart can never start a second workflow that would dial the same leads again.
