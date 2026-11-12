@@ -136,6 +136,7 @@ class LeadState:
     last_disposition: str | None = None
     last_ended_at: datetime | None = None
     callback_at: datetime | None = None  # set when the last disposition was callback_requested
+    hold_until: datetime | None = None  # short back-off after a failed attempt to place a call
     final_state: str | None = None  # completed / exhausted / dnd_blocked once finished
 
     @property
@@ -203,8 +204,10 @@ def ready_at(lead: LeadState, cfg: CampaignConfig, sim_now: datetime,
     to wait, or None if it is finished or in flight."""
     if lead.is_finished or lead.active:
         return None
-    not_before = earliest_next_call(lead, cfg.retry_policy.wait_minutes)
-    t = sim_now if not_before is None else max(sim_now, not_before)
+    t = sim_now
+    for not_before in (earliest_next_call(lead, cfg.retry_policy.wait_minutes), lead.hold_until):
+        if not_before is not None and not_before > t:
+            t = not_before
     return next_allowed_start(t, cfg.campaign(lead.campaign_id), cfg.regulatory_window,
                               close_margin_s)
 

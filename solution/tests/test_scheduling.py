@@ -171,6 +171,23 @@ class TestReadyAndWake:
         assert pick_next([l], self.cfg, ist(12, 12), set()) == [l]
 
 
+class TestHoldUntil:
+    def setup_method(self):
+        self.cfg = make_cfg([campaign()])
+
+    def test_hold_delays_a_fresh_lead(self):
+        l = lead(hold_until=ist(12, 12, 5))
+        assert pick_next([l], self.cfg, ist(12, 12), set()) == []
+        assert next_wake_time([l], self.cfg, ist(12, 12), set()) == ist(12, 12, 5)
+        assert pick_next([l], self.cfg, ist(12, 12, 5), set()) == [l]
+
+    def test_later_of_hold_and_retry_wait_wins(self):
+        l = lead(attempts=1)
+        record_call_result(l, "failed", None, ist(12, 11), None)  # retry from 11:15
+        l.hold_until = ist(12, 11, 20)
+        assert next_wake_time([l], self.cfg, ist(12, 11, 1), set()) == ist(12, 11, 20)
+
+
 # --------------------------------------------------------------------------- priority
 class TestPriority:
     def test_groups(self):

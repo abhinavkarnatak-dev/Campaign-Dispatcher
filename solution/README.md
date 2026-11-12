@@ -28,7 +28,7 @@ cd solution
 pytest
 ```
 
-The tests use a fake clock, so they never wait on the provider or on Temporal.
+The scheduling and provider tests use a fake clock and a fake provider, so they never wait on anything. The workflow tests start a real local Temporal server automatically (downloaded once on the first run, about 50 MB) and are skipped if it cannot start.
 
 ## Configuration
 
@@ -56,7 +56,8 @@ solution/
 │   ├── clock.py       # the provider's simulated clock
 │   ├── scheduling.py  # the business rules: windows, waits, priority, limits, final states
 │   ├── provider.py    # client for the provider API, safe retries with one request_id
-│   └── activities.py  # Temporal activities: place_call and get_call
+│   ├── activities.py  # Temporal activities: place_call and get_call
+│   └── workflow.py    # the coordinator workflow that owns every lead
 └── tests/            # pytest tests, no network needed
 ```
 
@@ -84,6 +85,8 @@ All business rules live in `dispatcher/scheduling.py` as pure functions: they ta
 | Terminal and DND (R7, R8) | A terminal disposition finishes the lead. `dnd` blocks that phone in every campaign |
 | Final state (R9) | `completed` > `exhausted` > `dnd_blocked`. A lead with a call in flight is never finalised until that call's result arrives |
 
+If an attempt to place a call fails (the provider keeps answering 503, or rejects it), the lead waits a short time before it can be picked again (1 simulated minute, or 5 after a rejection), so a failing lead cannot make the dispatcher hammer the provider.
+
 ## Placing calls safely
 
 Every call attempt gets a `request_id` (for example `c_acme_renewals:ren_0001:d2`) chosen by the workflow **before** anything is sent, and saved in Temporal's history. Every retry of that attempt uses the same `request_id`, and the provider places at most one call per `request_id`. So a retry after an error, a timeout or a crash can never place a second call.
@@ -98,3 +101,25 @@ Every call attempt gets a `request_id` (for example `c_acme_renewals:ren_0001:d2
 | `409`, `422`, `429` (a rule was broken) | `rejected`, never retried |
 
 Right before every request, including retries, the activity checks the calling window again using the real current time. If the window has closed, nothing is sent and the answer is `not_placed`. If a lookup itself fails, the error goes up to Temporal, which retries the whole activity later with the same `request_id`.
+
+## The workflow
+
+One Temporal workflow, `CampaignDispatcher`, owns all the leads. One coordinator is used instead of one workflow per lead because three rules are global: the tenant limit is shared across campaigns, a phone may not be called twice at once across campaigns, and DND blocks a phone everywhere. With every lead in one place, these checks are simple and cannot race.
+
+The loop:
+
+1. Work out the simulated time from `workflow.now()`.
+2. Finalise every lead that is done.
+3. Pick the leads to call now (`pick_next`).
+4. For each pick, mark the lead active (its tenant slot and phone are reserved at once), give it a new `request_id`, and start `place_call` in the background.
+5. Sleep until the next lead becomes ready, or until something happens (a call result arrives or an activity finishes).
+
+Call results come in as the `call_result` signal:
+
+- A result whose `call_sid` was already applied is ignored, so duplicate webhooks are harmless.
+- A result can arrive before `place_call` has returned (the webhook beat the `201`). The result proves the call was accepted, so the attempt is counted right then, and the later activity answer sees it was already counted.
+- A `dnd` result adds the phone to the DND list, and any other lead with that phone that is not completed or exhausted becomes `dnd_blocked`.
+
+Progress can be read at any time with the workflow's `status` query.
+
+**Why it survives a crash:** every decision, activity result, signal and timer is stored in Temporal's history. A restarted worker replays that history through the same code, rebuilds exactly the same state, and continues. To keep replay exact, the workflow only reads time from `workflow.now()`, never touches the network (activities do), and never makes a decision based on the order of a Python set. The campaign config is passed in without the webhook secret, because workflow inputs are stored in history.
