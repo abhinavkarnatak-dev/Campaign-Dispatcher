@@ -1,0 +1,12 @@
+# Extra safety on top of the repo's root .gitignore
+.env
+.env.*
+!.env.example
+*.db
+*.db-*
+*.log
+logs/
+final_state.csv
+__pycache__/
+.pytest_cache/
+.venv/
