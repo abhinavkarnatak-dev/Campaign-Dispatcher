@@ -52,8 +52,9 @@ To use **Temporal Cloud** instead of the local server, copy `solution/.env.examp
 ```
 solution/
 ├── dispatcher/
-│   ├── config.py     # loads campaigns, leads and runtime settings
-│   └── clock.py      # the provider's simulated clock
+│   ├── config.py      # loads campaigns, leads and runtime settings
+│   ├── clock.py       # the provider's simulated clock
+│   └── scheduling.py  # the business rules: windows, waits, priority, limits, final states
 └── tests/            # pytest tests, no network needed
 ```
 
@@ -64,3 +65,19 @@ The provider runs a simulated clock, 600 times faster than real time by default.
 The dispatcher reads the clock's starting point and speed once from `GET /v1/clock`, then computes simulated time itself. Inside the workflow it uses `workflow.now()` as the real time, because Temporal gives back the same value when it replays the workflow after a crash.
 
 Customer names in the lead files are never loaded. They are not needed, and anything the workflow holds is stored in Temporal's history.
+
+## Scheduling rules
+
+All business rules live in `dispatcher/scheduling.py` as pure functions: they take the current simulated time and the lead states, and return decisions. No network, no clock reading. This makes them safe to run inside a Temporal workflow and easy to test.
+
+| Rule | How it is applied |
+|---|---|
+| Calling window (R1) | A call starts only inside both the campaign window and 09:00-21:00 IST, on an allowed day. The provider's 2 minute grace is never relied on, and no call starts in the last 60 simulated seconds before a window closes |
+| Concurrency (R2) | Active calls are counted per tenant, across all of that tenant's campaigns |
+| One call per phone (R3) | A phone with an active call is skipped, in every campaign |
+| Attempts (R4) | A lead with `max_attempts` accepted calls is never dialled again |
+| Retries (R5) | Next attempt no earlier than the provider's `ended_at` plus 60 minutes (`no_answer`, `busy`) or 15 minutes (`failed`) |
+| Callbacks (R6) | Next attempt no earlier than `callback_at`, or the next window opening if that falls outside the window |
+| Priority (R6) | Due callbacks first, then due retries, then fresh leads. Inside each group, the one waiting longest goes first |
+| Terminal and DND (R7, R8) | A terminal disposition finishes the lead. `dnd` blocks that phone in every campaign |
+| Final state (R9) | `completed` > `exhausted` > `dnd_blocked`. A lead with a call in flight is never finalised until that call's result arrives |
