@@ -30,6 +30,7 @@ from .activities import DispatcherActivities
 from .clock import SimClock, fetch_clock
 from .config import CampaignConfig, Settings, load_campaign_config, load_settings
 from .provider import CallResult, ProviderClient
+from .output import write_final_state
 from .webhooks import create_app, status_to_dict
 from .workflow import DispatchInput, DispatchResult, DispatcherWorkflow
 
@@ -122,6 +123,8 @@ async def run(settings: Settings | None = None) -> DispatchResult:
         counts[lead.final_state] = counts.get(lead.final_state, 0) + 1
     log.info("all %d leads finished: %s", len(result.leads), counts)
     log.info("workflow counters: %s", result.counters)
+    path = write_final_state(result.leads, settings.output_path)
+    log.info("wrote %s", path)
     return result
 
 

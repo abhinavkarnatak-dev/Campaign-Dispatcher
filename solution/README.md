@@ -48,9 +48,18 @@ cd solution
 python -m dispatcher run
 ```
 
-It runs until every lead reaches a final state, then prints a summary and exits. While it runs, http://127.0.0.1:8200/status shows progress per campaign.
+It runs until every lead reaches a final state, writes `final_state.csv` in the repo root, prints a summary and exits. While it runs, http://127.0.0.1:8200/status shows progress per campaign.
 
 **Restarting** is the same command. If the process is killed (even with `kill -9`), running `python -m dispatcher run` again re-attaches to the same workflow and continues. Against a brand new provider run, it starts a fresh workflow. If the workflow has already finished, it just reads the result.
+
+**4. Check the result**
+
+```bash
+cd solution
+python -m dispatcher verify
+```
+
+This compares `final_state.csv` with the provider's `/admin/leads`, lead by lead, and shows the provider's `/admin/report` (violations, concurrency, callback lateness, webhook counts). It ends with `RESULT: PASS` or `RESULT: FAIL`.
 
 ## Run the tests
 
@@ -90,8 +99,9 @@ solution/
 │   ├── activities.py  # Temporal activities: place_call and get_call
 │   ├── workflow.py    # the coordinator workflow that owns every lead
 │   ├── webhooks.py    # webhook receiver: checks signatures, signals the workflow
+│   ├── output.py      # writes final_state.csv, and the verify check
 │   ├── main.py        # runs receiver, worker and workflow in one process
-│   └── __main__.py    # command line: python -m dispatcher run
+│   └── __main__.py    # command line: python -m dispatcher run / verify
 └── tests/            # pytest tests, no network needed
 ```
 
@@ -196,3 +206,17 @@ A webhook that arrives after its result was recovered is ignored, because its `c
 The watchdog checks soon after the call ends instead of waiting out the provider's 7 second retry window, because at 600x speed 7 real seconds is 70 simulated minutes of a lead holding a call slot.
 
 **A crash during `place_call`:** the activity sends a heartbeat to Temporal before every HTTP request. If the worker is killed mid-request, the heartbeats stop and Temporal runs the activity again within 10 seconds, with the same `request_id`, so the provider returns the existing call instead of placing a new one.
+
+## Output
+
+`final_state.csv` has one row per lead, sorted by `campaign_id, lead_id`:
+
+```
+campaign_id,lead_id,final_state,attempts,last_status,last_disposition
+c_acme_feedback,fb_0001,completed,2,completed,interested
+c_acme_feedback,fb_0002,exhausted,3,no_answer,
+```
+
+`attempts` counts the calls the provider accepted. `last_status` and `last_disposition` come from the lead's most recent ended call and are empty if there was none. Lines end with `\n`.
+
+The file is written to a temporary file first and then renamed into place, so a crash while writing never leaves a half written file. If the process dies after the workflow finished but before the file was written, running `python -m dispatcher run` again reads the finished workflow's stored result and writes the file, without placing any calls.
