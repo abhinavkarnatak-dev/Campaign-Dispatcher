@@ -61,6 +61,11 @@ class SimClock:
         return max(0.0, self.real_seconds(sim_gap))
 
 
+def workflow_id_for(clock: SimClock) -> str:
+    """One workflow per provider run: the provider's clock start time identifies it."""
+    return f"campaign-dispatch-{int(clock.real_epoch)}"
+
+
 def fetch_clock(provider_url: str, timeout: float = 5.0) -> SimClock:
     """Read the provider's clock parameters from GET /v1/clock.
 

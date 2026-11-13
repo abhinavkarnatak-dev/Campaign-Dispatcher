@@ -197,6 +197,13 @@ The workflow ID includes the provider's clock start time, for example `campaign-
 
 So a restart can never start a second workflow that would dial the same leads again.
 
+**A workflow left over from an earlier provider run.** If a run is stopped partway and a new provider run is started against the same Temporal server, the old workflow is still "running" in Temporal. Without care, the new worker would pick it up and place calls against the new provider using the old run's state. Two things prevent that:
+
+1. At startup, before the worker starts, the dispatcher terminates any other running `CampaignDispatcher` workflow on its task queue, and logs that it did.
+2. Every activity checks which workflow called it. For any workflow other than the current provider run's, it fails permanently without contacting the provider.
+
+**Temporal server restarts.** The workflow's state lives in the Temporal server's database (`--db-filename`), so a restart of the server loses nothing. While it is down, the worker keeps reconnecting, webhooks get a `503` (the provider redelivers, and the watchdog catches anything it gives up on), and the dispatcher keeps waiting for the result instead of exiting.
+
 ## Lost results
 
 A call's result can fail to reach the dispatcher in two ways: the provider sometimes never sends the webhook, and a webhook sent while the dispatcher is down is given up after the provider's retries (about 7 real seconds).
