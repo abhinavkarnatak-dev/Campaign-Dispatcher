@@ -127,6 +127,7 @@ class ProviderClient:
         phone: str,
         callback_url: str,
         may_send: Callable[[], bool] = lambda: True,
+        on_step: Callable[[], None] = lambda: None,
         backoff: tuple[float, ...] = DEFAULT_BACKOFF,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> PlaceCallOutcome:
@@ -135,6 +136,9 @@ class ProviderClient:
         may_send is checked right before every POST (including retries). If it says
         no (for example the calling window has just closed), nothing is sent and the
         answer is not_placed.
+
+        on_step is called before every HTTP request. The activity uses it to send a
+        heartbeat to Temporal, so a killed worker is noticed within seconds.
         """
         body = {
             "request_id": request_id,
@@ -153,18 +157,19 @@ class ProviderClient:
                 # Before saying "not placed", make sure an earlier unknown attempt
                 # did not in fact place the call.
                 if last_reason.startswith("unknown"):
-                    found = await self.find_by_request_id(request_id)
+                    found = await self._lookup(request_id, on_step)
                     if found is not None:
                         return PlaceCallOutcome(ACCEPTED, call=found)
                 return PlaceCallOutcome(NOT_PLACED, reason="window_closed")
 
             try:
+                on_step()
                 resp = await self._client.post(f"{self.base_url}/v1/calls", json=body)
             except httpx.HTTPError as exc:
                 # The request may or may not have reached the provider.
                 last_reason = f"unknown:{type(exc).__name__}"
                 log.warning("place_call %s: network error %s, checking", request_id, exc)
-                found = await self.find_by_request_id(request_id)
+                found = await self._lookup(request_id, on_step)
                 if found is not None:
                     return PlaceCallOutcome(ACCEPTED, call=found)
                 continue
@@ -178,7 +183,7 @@ class ProviderClient:
             if code == 504:
                 # Outcome unknown: ask the provider whether the call exists.
                 last_reason = "unknown:504"
-                found = await self.find_by_request_id(request_id)
+                found = await self._lookup(request_id, on_step)
                 if found is not None:
                     return PlaceCallOutcome(ACCEPTED, call=found)
                 continue
@@ -188,7 +193,7 @@ class ProviderClient:
                 return PlaceCallOutcome(REJECTED, reason=f"{code}:{detail}")
             # Anything else (400, 500...) is unexpected: treat as unknown and check.
             last_reason = f"unknown:{code}"
-            found = await self.find_by_request_id(request_id)
+            found = await self._lookup(request_id, on_step)
             if found is not None:
                 return PlaceCallOutcome(ACCEPTED, call=found)
 
@@ -197,10 +202,15 @@ class ProviderClient:
         # fails, the error propagates and Temporal retries the whole activity with
         # the same request_id, which is safe.
         if last_reason.startswith("unknown"):
-            found = await self.find_by_request_id(request_id)
+            found = await self._lookup(request_id, on_step)
             if found is not None:
                 return PlaceCallOutcome(ACCEPTED, call=found)
         return PlaceCallOutcome(NOT_PLACED, reason=last_reason or "gave_up")
+
+
+    async def _lookup(self, request_id: str, on_step: Callable[[], None]) -> CallInfo | None:
+        on_step()
+        return await self.find_by_request_id(request_id)
 
 
 def _error_detail(resp: httpx.Response) -> str:

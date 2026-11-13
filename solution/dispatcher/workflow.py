@@ -31,7 +31,7 @@ with workflow.unsafe.imports_passed_through():
     from .activities import PlaceCallInput
     from .clock import SimClock
     from .config import CampaignConfig
-    from .provider import ACCEPTED, REJECTED, CallResult, PlaceCallOutcome
+    from .provider import ACCEPTED, REJECTED, CallInfo, CallResult, PlaceCallOutcome
     from .scheduling import (
         LeadState,
         next_wake_time,
@@ -40,9 +40,12 @@ with workflow.unsafe.imports_passed_through():
         resolve_final_state,
     )
 
-# How long one place_call activity may run before Temporal considers it lost (for
-# example because our worker was killed) and runs it again with the same request_id.
-PLACE_CALL_TIMEOUT = timedelta(seconds=30)
+# place_call sends a heartbeat before every HTTP request. If the worker is killed,
+# Temporal sees the heartbeats stop and runs the activity again (same request_id)
+# after PLACE_CALL_HEARTBEAT, instead of waiting for the full PLACE_CALL_TIMEOUT.
+PLACE_CALL_TIMEOUT = timedelta(seconds=60)
+PLACE_CALL_HEARTBEAT = timedelta(seconds=10)
+GET_CALL_TIMEOUT = timedelta(seconds=10)
 PLACE_CALL_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=1),
     backoff_coefficient=2.0,
@@ -53,6 +56,13 @@ PLACE_CALL_RETRY = RetryPolicy(
 # Simulated back-off before trying a lead again after a failed placement.
 HOLD_AFTER_REJECTED = timedelta(minutes=5)
 HOLD_AFTER_UNAVAILABLE = timedelta(minutes=1)
+
+# Lost results. The provider's longest call is 45s of ringing plus 6 minutes of
+# talk, so by CALL_MAX_SIM after acceptance every call has ended. If no result has
+# arrived by then (webhook lost, or we were down), ask the provider for it.
+CALL_MAX_SIM = timedelta(minutes=8)
+FIRST_CHECK_MIN_REAL = timedelta(seconds=1)
+RECHECK_REAL = timedelta(seconds=2)
 
 # Smallest real sleep between loop turns, so a wake time that is a hair in the
 # future cannot make the loop spin.
@@ -197,6 +207,7 @@ class DispatcherWorkflow:
             PlaceCallInput(request_id, lead.campaign_id, lead.lead_id, lead.phone),
             result_type=PlaceCallOutcome,
             start_to_close_timeout=PLACE_CALL_TIMEOUT,
+            heartbeat_timeout=PLACE_CALL_HEARTBEAT,
             retry_policy=PLACE_CALL_RETRY,
         )
         req = self._requests[request_id]
@@ -204,6 +215,8 @@ class DispatcherWorkflow:
             self._accept(request_id, outcome.call.call_sid)
             if outcome.call.result is not None:  # already ended (a replayed request)
                 self._apply_result(outcome.call.result)
+            if req.status != DONE:
+                self._tasks.append(asyncio.create_task(self._watch(request_id)))
         elif req.status == PENDING:
             # Definitely not placed. Free the slot and let the lead be picked again.
             req.status = NOT_PLACED
@@ -217,6 +230,35 @@ class DispatcherWorkflow:
                 if outcome.reason != "window_closed":
                     lead.hold_until = self._sim_now() + HOLD_AFTER_UNAVAILABLE
         self._wake = True
+
+    async def _watch(self, request_id: str) -> None:
+        """Make sure an accepted call's result is never lost.
+
+        Waits until the call must have ended. If its result has not arrived by then
+        (the webhook was lost, or we were down when it was sent), asks the provider
+        for it and applies it exactly like a webhook. A webhook that turns up later
+        is ignored, because its call_sid has already been applied."""
+        req = self._requests[request_id]
+        first = timedelta(seconds=self._clock.real_seconds(CALL_MAX_SIM.total_seconds()))
+        wait = max(first, FIRST_CHECK_MIN_REAL)
+        while req.status != DONE:
+            try:
+                await workflow.wait_condition(lambda: req.status == DONE, timeout=wait)
+                return
+            except asyncio.TimeoutError:
+                pass
+            info: CallInfo | None = await workflow.execute_activity(
+                "get_call", req.call_sid, result_type=CallInfo,
+                start_to_close_timeout=GET_CALL_TIMEOUT)
+            if req.status == DONE:  # the webhook arrived while we were asking
+                return
+            if info is not None and info.state == "ended" and info.result is not None:
+                self._count("results_recovered")
+                workflow.logger.info("result for %s recovered from the provider", request_id)
+                self._apply_result(info.result)
+                self._wake = True
+                return
+            wait = RECHECK_REAL
 
     def _accept(self, request_id: str, call_sid: str) -> None:
         """Count the attempt once, whichever arrives first: the activity's answer or

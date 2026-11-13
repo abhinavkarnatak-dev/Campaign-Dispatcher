@@ -41,12 +41,17 @@ class FakeProvider:
     """Stands in for the telephony provider and checks every rule it can see."""
 
     def __init__(self, cfg: CampaignConfig, clock: SimClock, script, *,
-                 early_every: int = 0, duplicate_every: int = 0):
+                 early_every: int = 0, duplicate_every: int = 0, lose_every: int = 0):
         self.cfg = cfg
         self.clock = clock
         self.script = script  # (campaign_id, lead_id, attempt_no) -> (status, disposition)
         self.early_every = early_every
         self.duplicate_every = duplicate_every
+        self.lose_every = lose_every  # every Nth result is never sent as a webhook
+        self.finished = 0
+        self.lost = 0
+        self.lookups = 0
+        self.by_sid: dict[str, CallInfo] = {}
         self.client: Client | None = None
         self.workflow_id = ""
         self.by_request: dict[str, CallInfo] = {}
@@ -91,6 +96,7 @@ class FakeProvider:
         info = CallInfo(call_sid=sid, request_id=inp.request_id, state="active",
                         created_at=self._sim_now().isoformat())
         self.by_request[inp.request_id] = info
+        self.by_sid[sid] = info
 
         status, disp = self.script(inp.campaign_id, inp.lead_id, self.attempts[key])
         early = self.early_every and self.calls % self.early_every == 0
@@ -122,10 +128,23 @@ class FakeProvider:
                          campaign_id=inp.campaign_id, lead_id=inp.lead_id, phone=inp.phone,
                          status=status, disposition=disp, callback_at=callback_at,
                          ended_at=ended.isoformat())
+        ended_info = CallInfo(call_sid=info.call_sid, request_id=info.request_id, state="ended",
+                              created_at=info.created_at, result=res)
+        self.by_sid[info.call_sid] = ended_info
+        self.by_request[inp.request_id] = ended_info
+        self.finished += 1
+        if self.lose_every and self.finished % self.lose_every == 0:
+            self.lost += 1  # webhook never sent: the workflow must ask for it
+            return
         handle = self.client.get_workflow_handle(self.workflow_id)
         await handle.signal("call_result", res)
         if self.duplicate_every and self.calls % self.duplicate_every == 0:
             await handle.signal("call_result", res)
+
+    @activity.defn(name="get_call")
+    async def get_call(self, call_sid: str) -> CallInfo | None:
+        self.lookups += 1
+        return self.by_sid.get(call_sid)
 
     def expected_states(self) -> dict[tuple[str, str], str]:
         """Same precedence the real provider uses in /admin/leads."""
@@ -180,7 +199,7 @@ async def run_dispatch(cfg: CampaignConfig, fake: FakeProvider, *, swap_worker_a
 
         def new_worker():
             return Worker(client, task_queue=task_queue, workflows=[DispatcherWorkflow],
-                          activities=[fake.place_call],
+                          activities=[fake.place_call, fake.get_call],
                           max_cached_workflows=0 if replay_every_step else 100)
 
         worker = new_worker()
@@ -296,3 +315,26 @@ def test_full_fixtures_with_worker_crash_midway():
     assert fake.max_seen["acme_insurance"] <= 4 and fake.max_seen["zen_retail"] <= 3
     assert result.counters["calls_accepted"] == fake.calls
     assert result.counters["duplicate_results"] > 0
+
+
+def test_lost_webhooks_are_recovered():
+    """Every 4th result is never sent. Each one must be fetched from the provider,
+    and the run must still end with every lead matching the provider's view."""
+    cfg = small_cfg()
+    fake = FakeProvider(cfg, make_clock(), small_script, lose_every=4)
+    result, _, _ = asyncio.run(run_dispatch(cfg, fake, replay_every_step=True))
+    assert_matches_provider(result, fake)
+    assert fake.lost > 0
+    assert result.counters["results_recovered"] == fake.lost
+
+
+def test_full_fixtures_with_lost_webhooks_and_crash():
+    """All 200 leads with lost, early and duplicate results, and a worker crash."""
+    cfg = real_cfg()
+    fake = FakeProvider(cfg, make_clock(), hashed_script("t2"), early_every=9,
+                        duplicate_every=6, lose_every=15)
+    result, _, _ = asyncio.run(run_dispatch(cfg, fake, swap_worker_after=80))
+    assert_matches_provider(result, fake)
+    assert fake.lost > 10
+    assert result.counters["results_recovered"] == fake.lost
+    assert result.counters["calls_accepted"] == fake.calls

@@ -17,6 +17,13 @@ from .provider import CallInfo, PlaceCallOutcome, ProviderClient
 from .scheduling import can_start_call
 
 
+def _heartbeat() -> None:
+    """Tell Temporal this activity is still alive. If the worker is killed, the
+    missing heartbeats let Temporal retry the activity within seconds."""
+    if activity.in_activity():
+        activity.heartbeat()
+
+
 @dataclass
 class PlaceCallInput:
     request_id: str  # chosen by the workflow before this activity runs
@@ -53,6 +60,7 @@ class DispatcherActivities:
             phone=inp.phone,
             callback_url=self.callback_url,
             may_send=lambda: self.window_open_now(inp.campaign_id),
+            on_step=_heartbeat,
         )
 
     @activity.defn(name="get_call")

@@ -191,6 +191,24 @@ def test_failing_lookup_raises_so_the_activity_is_retried():
         asyncio.run(run())
 
 
+def test_on_step_runs_before_every_request():
+    # 503, then 504 (lookup: not found), then 201: three POSTs and one lookup.
+    fake = FakeProvider([(503, False), (504, False), (201, True)])
+    steps = []
+
+    async def run():
+        client = ProviderClient(BASE, httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)))
+        try:
+            return await client.place_call(
+                request_id="c1:l1:d1", campaign_id="c1", lead_id="l1", phone="+919000000001",
+                callback_url="u", on_step=lambda: steps.append(1), sleep=_no_sleep)
+        finally:
+            await client.aclose()
+
+    assert asyncio.run(run()).outcome == ACCEPTED
+    assert len(steps) == fake.posts + fake.lookups == 4
+
+
 # --------------------------------------------------------------------------- lookups
 def test_get_call_returns_result_once_ended():
     async def run():

@@ -180,3 +180,19 @@ The workflow ID includes the provider's clock start time, for example `campaign-
 | Restart after the workflow finished | Temporal refuses a duplicate, so the dispatcher reads the stored result |
 
 So a restart can never start a second workflow that would dial the same leads again.
+
+## Lost results
+
+A call's result can fail to reach the dispatcher in two ways: the provider sometimes never sends the webhook, and a webhook sent while the dispatcher is down is given up after the provider's retries (about 7 real seconds).
+
+Every accepted call therefore has a watchdog in the workflow:
+
+1. Wait until the call must have ended. The provider's longest call is 45 seconds of ringing plus 6 minutes of talk, so the watchdog waits 8 simulated minutes (at least 1 real second).
+2. If the result has arrived by then, stop.
+3. Otherwise ask the provider with `GET /v1/calls/{call_sid}` and apply the result exactly like a webhook. If the call is somehow still active, ask again every 2 real seconds.
+
+A webhook that arrives after its result was recovered is ignored, because its `call_sid` has already been applied. The watchdog's timer and lookup are part of the workflow, so after a restart every waiting watchdog carries on, and catches the results that were sent while the dispatcher was down. The number of results found this way is shown as `results_recovered` in `/status` and in the final summary.
+
+The watchdog checks soon after the call ends instead of waiting out the provider's 7 second retry window, because at 600x speed 7 real seconds is 70 simulated minutes of a lead holding a call slot.
+
+**A crash during `place_call`:** the activity sends a heartbeat to Temporal before every HTTP request. If the worker is killed mid-request, the heartbeats stop and Temporal runs the activity again within 10 seconds, with the same `request_id`, so the provider returns the existing call instead of placing a new one.
