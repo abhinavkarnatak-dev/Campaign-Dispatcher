@@ -95,7 +95,11 @@ class FakeProvider:
         status, disp = self.script(inp.campaign_id, inp.lead_id, self.attempts[key])
         early = self.early_every and self.calls % self.early_every == 0
         if early:  # the call ends and the webhook arrives before we return the 201
-            await self._finish(inp, tenant, info, status, disp)
+            # Shielded: a worker shutdown cancels this activity, but the provider's
+            # call (and its webhook) carries on regardless, as with the real provider.
+            task = asyncio.create_task(self._finish(inp, tenant, info, status, disp))
+            self._tasks.append(task)
+            await asyncio.shield(task)
         else:
             self._tasks.append(asyncio.create_task(self._finish(inp, tenant, info, status, disp, delay=0.02)))
         return PlaceCallOutcome(ACCEPTED, call=info)
