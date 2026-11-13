@@ -34,6 +34,7 @@ with workflow.unsafe.imports_passed_through():
     from .provider import ACCEPTED, REJECTED, CallInfo, CallResult, PlaceCallOutcome
     from .scheduling import (
         LeadState,
+        close_margin_for,
         next_wake_time,
         pick_next,
         record_call_result,
@@ -169,10 +170,13 @@ class DispatcherWorkflow:
             if all(lead.is_finished for lead in self._leads.values()):
                 break
 
-            for lead in pick_next(self._leads.values(), self._cfg, sim_now, self._dnd_phones):
+            margin = close_margin_for(self._clock.speed)
+            for lead in pick_next(self._leads.values(), self._cfg, sim_now, self._dnd_phones,
+                                  margin):
                 self._start_dial(lead)
 
-            wake_at = next_wake_time(self._leads.values(), self._cfg, sim_now, self._dnd_phones)
+            wake_at = next_wake_time(self._leads.values(), self._cfg, sim_now, self._dnd_phones,
+                                     margin)
             timeout = None
             if wake_at is not None:
                 real = self._clock.real_delay_until(wake_at, workflow.now())

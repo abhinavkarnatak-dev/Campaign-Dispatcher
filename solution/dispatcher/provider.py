@@ -25,6 +25,13 @@ ACCEPTED = "accepted"
 NOT_PLACED = "not_placed"
 REJECTED = "rejected"
 
+# Real seconds to wait for an answer to POST /v1/calls. A normal answer takes a few
+# milliseconds. A request that hangs is abandoned and treated like a 504: look the
+# call up by request_id, then retry with the same request_id. Waiting it out instead
+# costs a lot at simulated speed (2 real seconds is 20 simulated minutes at 600x),
+# and the lead holds a call slot the whole time.
+DEFAULT_POST_TIMEOUT = 0.5
+
 # Real seconds to wait between retries after a 503 or an unknown outcome. Kept short:
 # at 600x speed, 1.5 real seconds in total is already about 15 simulated minutes,
 # and the lead holds one of its tenant's call slots while we retry.
@@ -92,9 +99,10 @@ class PlaceCallOutcome:
 
 class ProviderClient:
     def __init__(self, base_url: str, client: httpx.AsyncClient | None = None,
-                 timeout: float = 5.0):
+                 timeout: float = 5.0, post_timeout: float = DEFAULT_POST_TIMEOUT):
         self.base_url = base_url.rstrip("/")
         self._client = client or httpx.AsyncClient(timeout=timeout)
+        self.post_timeout = post_timeout
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -164,11 +172,13 @@ class ProviderClient:
 
             try:
                 on_step()
-                resp = await self._client.post(f"{self.base_url}/v1/calls", json=body)
+                resp = await self._client.post(f"{self.base_url}/v1/calls", json=body,
+                                               timeout=self.post_timeout)
             except httpx.HTTPError as exc:
                 # The request may or may not have reached the provider.
                 last_reason = f"unknown:{type(exc).__name__}"
-                log.warning("place_call %s: network error %s, checking", request_id, exc)
+                log.warning("place_call %s: %s, checking whether the call was placed",
+                            request_id, type(exc).__name__)
                 found = await self._lookup(request_id, on_step)
                 if found is not None:
                     return PlaceCallOutcome(ACCEPTED, call=found)

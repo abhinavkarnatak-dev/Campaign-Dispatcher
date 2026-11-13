@@ -14,7 +14,7 @@ from temporalio import activity
 from .clock import SimClock
 from .config import CampaignConfig
 from .provider import CallInfo, PlaceCallOutcome, ProviderClient
-from .scheduling import can_start_call
+from .scheduling import can_start_call, close_margin_for
 
 
 def _heartbeat() -> None:
@@ -49,7 +49,8 @@ class DispatcherActivities:
         Unlike the workflow, an activity is never replayed, so reading the machine
         clock here is fine, and it is the most accurate moment to check."""
         sim_now = self.clock.sim_at(datetime.now(timezone.utc))
-        return can_start_call(sim_now, self.cfg.campaign(campaign_id), self.cfg.regulatory_window)
+        return can_start_call(sim_now, self.cfg.campaign(campaign_id), self.cfg.regulatory_window,
+                              close_margin_for(self.clock.speed))
 
     @activity.defn(name="place_call")
     async def place_call(self, inp: PlaceCallInput) -> PlaceCallOutcome:

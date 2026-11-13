@@ -24,6 +24,7 @@ from dispatcher.scheduling import (
     PRIORITY_RETRY,
     LeadState,
     can_start_call,
+    close_margin_for,
     earliest_next_call,
     next_allowed_start,
     next_wake_time,
@@ -77,10 +78,19 @@ class TestCanStartCall:
     def test_at_close_is_not_allowed(self):
         assert not can_start_call(ist(12, 19), campaign(), REG)
 
-    def test_close_margin_blocks_last_minute(self):
-        assert can_start_call(ist(12, 18, 58, 59), campaign(), REG)
-        assert not can_start_call(ist(12, 18, 59, 0), campaign(), REG)
-        assert not can_start_call(ist(12, 18, 59, 30), campaign(), REG)
+    def test_close_margin_blocks_last_seconds(self):
+        # default margin is 15 simulated seconds
+        assert can_start_call(ist(12, 18, 59, 44), campaign(), REG)
+        assert not can_start_call(ist(12, 18, 59, 45), campaign(), REG)
+
+    def test_last_whole_minute_is_still_callable(self):
+        # callback_at is always on a whole minute: 18:59 must still get its call today
+        assert can_start_call(ist(12, 18, 59, 0), campaign(), REG)
+
+    def test_close_margin_scales_with_clock_speed(self):
+        assert close_margin_for(600) == 15  # 10 ms real is only 6 s, so the minimum wins
+        assert close_margin_for(3000) == 30
+        assert not can_start_call(ist(12, 18, 59, 40), campaign(), REG, close_margin_for(3000))
 
     def test_zero_margin_allows_up_to_close(self):
         assert can_start_call(ist(12, 18, 59, 59), campaign(), REG, close_margin_s=0)
@@ -93,7 +103,7 @@ class TestCanStartCall:
         assert not can_start_call(ist(12, 8, 30), late, REG)
         assert can_start_call(ist(12, 9, 0), late, REG)
         assert not can_start_call(ist(12, 21, 0), late, REG)
-        assert not can_start_call(ist(12, 20, 59, 30), late, REG)  # margin before 21:00
+        assert not can_start_call(ist(12, 20, 59, 50), late, REG)  # margin before 21:00
 
     def test_utc_input_is_converted_to_ist(self):
         # 06:30 UTC is 12:00 IST
@@ -111,7 +121,10 @@ class TestNextAllowedStart:
         assert next_allowed_start(ist(12, 19, 30), campaign(), REG) == ist(13, 10)
 
     def test_inside_close_margin_rolls_to_next_day(self):
-        assert next_allowed_start(ist(12, 18, 59, 30), campaign(), REG) == ist(13, 10)
+        assert next_allowed_start(ist(12, 18, 59, 50), campaign(), REG) == ist(13, 10)
+
+    def test_last_minute_callback_is_due_today(self):
+        assert next_allowed_start(ist(12, 18, 59), campaign(), REG) == ist(12, 18, 59)
 
     def test_skips_weekend(self):
         # Friday evening -> Monday morning for a weekday-only campaign
@@ -224,6 +237,43 @@ class TestPriority:
         early = lead("b", phone="+919000000002", attempts=1)
         record_call_result(early, "completed", "callback_requested", ist(12, 10), ist(12, 11))
         assert pick_next([late, early], cfg, ist(12, 12), set()) == [early]
+
+
+class TestCallbackSlotHold:
+    """Slots are held for callbacks that become due within the next 7 minutes."""
+
+    def setup_method(self):
+        self.cfg = make_cfg([campaign()], tenants=[Tenant("t1", 2)])
+
+    def _callback(self, lid, phone, due):
+        l = lead(lid, phone=phone, attempts=1)
+        record_call_result(l, "completed", "callback_requested", ist(12, 10), due)
+        return l
+
+    def test_fresh_lead_does_not_take_a_slot_held_for_a_callback(self):
+        busy = lead("busy", phone="+919000000009", active=True)
+        cb = self._callback("cb", "+919000000001", ist(12, 12, 5))  # due in 5 minutes
+        fresh = lead("fresh", phone="+919000000002")
+        assert pick_next([busy, cb, fresh], self.cfg, ist(12, 12), set()) == []
+
+    def test_callback_further_ahead_holds_nothing(self):
+        busy = lead("busy", phone="+919000000009", active=True)
+        cb = self._callback("cb", "+919000000001", ist(12, 12, 30))  # due in 30 minutes
+        fresh = lead("fresh", phone="+919000000002")
+        assert pick_next([busy, cb, fresh], self.cfg, ist(12, 12), set()) == [fresh]
+
+    def test_due_callback_uses_the_held_slot(self):
+        busy = lead("busy", phone="+919000000009", active=True)
+        cb = self._callback("cb", "+919000000001", ist(12, 12, 5))
+        fresh = lead("fresh", phone="+919000000002")
+        assert pick_next([busy, cb, fresh], self.cfg, ist(12, 12, 5), set()) == [cb]
+
+    def test_hold_only_applies_to_the_callbacks_tenant(self):
+        cfg = make_cfg([campaign("c1", "t1"), campaign("c2", "t2")],
+                       tenants=[Tenant("t1", 1), Tenant("t2", 1)])
+        cb = self._callback("cb", "+919000000001", ist(12, 12, 5))
+        other = lead("other", cid="c2", tenant="t2", phone="+919000000002")
+        assert pick_next([cb, other], cfg, ist(12, 12), set()) == [other]
 
 
 # --------------------------------------------------------------------------- R2 / R3 / R4 / R8 limits

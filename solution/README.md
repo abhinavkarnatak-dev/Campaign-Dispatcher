@@ -102,7 +102,7 @@ solution/
 │   ├── output.py      # writes final_state.csv, and the verify check
 │   ├── main.py        # runs receiver, worker and workflow in one process
 │   └── __main__.py    # command line: python -m dispatcher run / verify
-└── tests/            # pytest tests, no network needed
+└── tests/             # pytest tests
 ```
 
 ## How time works
@@ -119,7 +119,7 @@ All business rules live in `dispatcher/scheduling.py` as pure functions: they ta
 
 | Rule | How it is applied |
 |---|---|
-| Calling window (R1) | A call starts only inside both the campaign window and 09:00-21:00 IST, on an allowed day. The provider's 2 minute grace is never relied on, and no call starts in the last 60 simulated seconds before a window closes |
+| Calling window (R1) | A call starts only inside both the campaign window and 09:00-21:00 IST, on an allowed day. The provider's 2 minute grace is never relied on, and no call starts in the last few simulated seconds before a window closes (see below) |
 | Concurrency (R2) | Active calls are counted per tenant, across all of that tenant's campaigns |
 | One call per phone (R3) | A phone with an active call is skipped, in every campaign |
 | Attempts (R4) | A lead with `max_attempts` accepted calls is never dialled again |
@@ -128,6 +128,10 @@ All business rules live in `dispatcher/scheduling.py` as pure functions: they ta
 | Priority (R6) | Due callbacks first, then due retries, then fresh leads. Inside each group, the one waiting longest goes first |
 | Terminal and DND (R7, R8) | A terminal disposition finishes the lead. `dnd` blocks that phone in every campaign |
 | Final state (R9) | `completed` > `exhausted` > `dnd_blocked`. A lead with a call in flight is never finalised until that call's result arrives |
+
+**Close margin.** The activity checks the window again right before every request, so the margin only has to cover the real time between that check and the provider reading its own clock: one local HTTP request. It is 10 real milliseconds converted to simulated time, and at least 15 simulated seconds (15 seconds at the default 600x). It stays under a minute on purpose: `callback_at` is always on a whole minute, so a callback due at 18:59 for a window closing at 19:00 still gets its call that day instead of the next morning.
+
+**Slots held for callbacks.** If a tenant has callbacks that become due within the next 7 simulated minutes (the longest possible call), that many of its slots are kept free from retries and fresh leads. When the callback is due, a slot is free right away instead of waiting for a call to end. On the same seeds, this and the request timeout below cut callback lateness from p90 12 to 16 minutes down to 5 to 6 minutes, with no change in how long the whole campaign takes.
 
 If an attempt to place a call fails (the provider keeps answering 503, or rejects it), the lead waits a short time before it can be picked again (1 simulated minute, or 5 after a rejection), so a failing lead cannot make the dispatcher hammer the provider.
 
@@ -141,8 +145,10 @@ Every call attempt gets a `request_id` (for example `c_acme_renewals:ren_0001:d2
 |---|---|
 | `201`, or `200` (this `request_id` already exists) | `accepted` |
 | `503` | Retried a few times with the same `request_id`, then `not_placed` |
-| `504` or a network error (outcome unknown) | Look the call up with `GET /v1/calls?request_id=...`. Found: `accepted`. Not found: retried with the same `request_id` |
+| `504`, a network error, or no answer within 0.5 real seconds (outcome unknown) | Look the call up with `GET /v1/calls?request_id=...`. Found: `accepted`. Not found: retried with the same `request_id` |
 | `409`, `422`, `429` (a rule was broken) | `rejected`, never retried |
+
+A normal answer to `POST /v1/calls` takes a few milliseconds, so a request that takes longer than 0.5 real seconds is abandoned and handled like a `504`. Waiting it out is expensive: the provider sometimes hangs for 2 real seconds before answering `504`, which is 20 simulated minutes at 600x, with the lead holding a call slot the whole time.
 
 Right before every request, including retries, the activity checks the calling window again using the real current time. If the window has closed, nothing is sent and the answer is `not_placed`. If a lookup itself fails, the error goes up to Temporal, which retries the whole activity later with the same `request_id`.
 

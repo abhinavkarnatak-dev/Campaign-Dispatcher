@@ -4,6 +4,7 @@ httpx.MockTransport stands in for the provider, so every response (201, 200, 503
 504, rule violations, network errors) can be scripted without running anything.
 """
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -207,6 +208,33 @@ def test_on_step_runs_before_every_request():
 
     assert asyncio.run(run()).outcome == ACCEPTED
     assert len(steps) == fake.posts + fake.lookups == 4
+
+
+def test_hanging_post_is_abandoned_then_retried_with_same_request_id():
+    # The first POST times out (call NOT placed), the lookup finds nothing, and the
+    # retry with the same request_id is accepted. Every POST carries the short timeout.
+    seen = []
+
+    def handler(request):
+        if request.method == "POST":
+            assert request.extensions["timeout"]["read"] == 0.05
+            seen.append(json.loads(request.content)["request_id"])
+            if len(seen) == 1:
+                raise httpx.ReadTimeout("no answer in time", request=request)
+            return httpx.Response(201, json=CALL)
+        return httpx.Response(404, json={"detail": {"error": "not_found"}})
+
+    async def run():
+        client = ProviderClient(BASE, httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                                post_timeout=0.05)
+        try:
+            return await client.place_call(request_id="c1:l1:d1", campaign_id="c1", lead_id="l1",
+                                           phone="p", callback_url="u", sleep=_no_sleep)
+        finally:
+            await client.aclose()
+
+    assert asyncio.run(run()).outcome == ACCEPTED
+    assert seen == ["c1:l1:d1", "c1:l1:d1"]
 
 
 # --------------------------------------------------------------------------- lookups

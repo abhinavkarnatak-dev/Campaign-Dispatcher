@@ -28,10 +28,17 @@ from .config import DAYS, Campaign, CampaignConfig, Window
 TERMINAL_DISPOSITIONS = frozenset({"interested", "not_interested", "wrong_number", "dnd"})
 RETRY_STATUSES = frozenset({"no_answer", "busy", "failed"})
 
-# Stop starting calls this many simulated seconds before a window closes. Real time
-# passes between deciding to call and the request reaching the provider; at 600x a
-# tenth of a real second is a simulated minute. See SUBMISSION.md.
-DEFAULT_CLOSE_MARGIN_S = 60
+# Stop starting calls this many simulated seconds before a window closes. The
+# activity checks the window again right before every request, so the margin only has
+# to cover the real time between that check and the provider reading its own clock:
+# one local HTTP request. See close_margin_for().
+DEFAULT_CLOSE_MARGIN_S = 15
+CLOSE_MARGIN_REAL_S = 0.010  # real seconds of request delay the margin covers
+
+# Hold tenant slots for callbacks that become due within this long. The provider's
+# longest call is 45 s of ringing plus 6 min of talk, so a call started now could
+# still be running when the callback is due.
+CALLBACK_LOOKAHEAD = timedelta(minutes=7)
 
 # How far ahead to look for the next open window. A week covers every day pattern.
 _LOOKAHEAD_DAYS = 8
@@ -45,6 +52,16 @@ DND_BLOCKED = "dnd_blocked"
 PRIORITY_CALLBACK = 0
 PRIORITY_RETRY = 1
 PRIORITY_FRESH = 2
+
+
+def close_margin_for(speed: float) -> float:
+    """Close margin in simulated seconds for a given clock speed: CLOSE_MARGIN_REAL_S of
+    real time, and never less than DEFAULT_CLOSE_MARGIN_S.
+
+    It stays well under a minute at normal speeds, so a callback due at the last whole
+    minute of a window (callback_at is always on a whole minute) is still called that
+    day instead of the next morning."""
+    return max(DEFAULT_CLOSE_MARGIN_S, CLOSE_MARGIN_REAL_S * speed)
 
 
 # --------------------------------------------------------------------------- windows
@@ -218,7 +235,11 @@ def pick_next(leads: Iterable[LeadState], cfg: CampaignConfig, sim_now: datetime
     """Choose which leads to dial right now, in order.
 
     Applies R1 (window), R2 (tenant limit, shared across campaigns), R3 (one active
-    call per phone), R4 (attempts left), R5/R6 (waits and priority), R8 (DND)."""
+    call per phone), R4 (attempts left), R5/R6 (waits and priority), R8 (DND).
+
+    To keep callbacks on time, a tenant's slots are held for callbacks that become
+    due within CALLBACK_LOOKAHEAD: retries and fresh leads may not use those slots,
+    so a slot is free when the callback is due."""
     leads = list(leads)
 
     active_by_tenant: dict[str, int] = {}
@@ -229,13 +250,18 @@ def pick_next(leads: Iterable[LeadState], cfg: CampaignConfig, sim_now: datetime
             busy_phones.add(lead.phone)
 
     candidates: list[tuple[int, datetime, str, str, LeadState]] = []
+    held_for_callbacks: dict[str, int] = {}
     for lead in leads:
         if lead.is_finished or lead.active:
             continue
         if lead.attempts >= lead.max_attempts or lead.phone in dnd_phones:
             continue  # will be finalised by resolve_final_state, never dialled
         when = ready_at(lead, cfg, sim_now, close_margin_s)
-        if when is None or when > sim_now:
+        if when is None:
+            continue
+        if when > sim_now:
+            if priority_group(lead) == PRIORITY_CALLBACK and when <= sim_now + CALLBACK_LOOKAHEAD:
+                held_for_callbacks[lead.tenant_id] = held_for_callbacks.get(lead.tenant_id, 0) + 1
             continue
         due = earliest_next_call(lead, cfg.retry_policy.wait_minutes) or sim_now
         candidates.append((priority_group(lead), due, lead.campaign_id, lead.lead_id, lead))
@@ -243,8 +269,10 @@ def pick_next(leads: Iterable[LeadState], cfg: CampaignConfig, sim_now: datetime
     candidates.sort(key=lambda c: c[:4])
 
     chosen: list[LeadState] = []
-    for *_, lead in candidates:
+    for group, *_, lead in candidates:
         limit = cfg.tenant(lead.tenant_id).max_concurrent_calls
+        if group != PRIORITY_CALLBACK:
+            limit -= held_for_callbacks.get(lead.tenant_id, 0)
         if active_by_tenant.get(lead.tenant_id, 0) >= limit:
             continue
         if lead.phone in busy_phones:
