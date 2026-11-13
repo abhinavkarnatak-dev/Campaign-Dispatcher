@@ -61,6 +61,15 @@ python -m dispatcher verify
 
 This compares `final_state.csv` with the provider's `/admin/leads`, lead by lead, and shows the provider's `/admin/report` (violations, concurrency, callback lateness, webhook counts). It ends with `RESULT: PASS` or `RESULT: FAIL`.
 
+**Crash test**
+
+```bash
+cd solution
+python tools/chaos.py
+```
+
+Runs the dispatcher, hard-kills it 5 times at random moments while calls are in flight (SIGKILL, the same as `kill -9`, on Linux and macOS, `TerminateProcess` on Windows), stays down 10 seconds each time so webhooks sent meanwhile are lost, restarts it, and runs `verify` at the end. `python tools/chaos.py --help` shows the options. Start it instead of step 3, with a fresh provider.
+
 ## Run the tests
 
 ```bash
@@ -102,6 +111,8 @@ solution/
 │   ├── output.py      # writes final_state.csv, and the verify check
 │   ├── main.py        # runs receiver, worker and workflow in one process
 │   └── __main__.py    # command line: python -m dispatcher run / verify
+├── tools/
+│   └── chaos.py       # crash test: random hard kills, restarts, then verify
 └── tests/             # pytest tests
 ```
 
